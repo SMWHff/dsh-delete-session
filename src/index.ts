@@ -14,8 +14,13 @@ import { TYPERT_MANIFEST } from './typert.ts'
 /** Cordis plugin name (the Loader entry and client bundle id). */
 export const name = 'dsh-delete-session'
 
-/** Services required before load: the Typert registry plus every core service the deletion touches. */
-export const inject = ['typert', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry']
+/**
+ * Only typert is injected declaratively (it exists under this name in every
+ * current DSH profile). Every other core service is discovered defensively at
+ * call time inside DeleteSessionRuntime, so a future core rename degrades one
+ * layer instead of unmounting the whole plugin.
+ */
+export const inject = ['typert']
 
 /**
  * Mount the delete-session service and its strict Typert manifest.
@@ -23,8 +28,10 @@ export const inject = ['typert', 'agents', 'sessions', 'sessionPersistence', 'wo
  */
 export function apply(ctx: Context): void {
   new DeleteSessionRuntime(ctx)
+  const register = (ctx as { typert?: { register(c: unknown): unknown } }).typert?.register
+  if (register === undefined) return
   ctx.effect(() => {
-    const dispose = ctx.typert.register(TYPERT_MANIFEST)
-    return () => { void dispose() }
+    const dispose = register.call(ctx.typert, TYPERT_MANIFEST)
+    return () => { void dispose }
   }, 'dsh-delete-session: typert manifest')
 }

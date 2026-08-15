@@ -1,24 +1,37 @@
 /**
  * The dsh-delete-session host Remote service (`ctx.deleteSession`, wire
- * namespace `deleteSession`). The deletion is layered, from safest to most
- * destructive:
+ * namespace `deleteSession`). Services are discovered defensively: the DSH
+ * core renamed services across versions (session vs sessions, workspace vs
+ * workspaceRegistry, session-persistence-jsonl vs sessionPersistence), so
+ * this runtime tries every known candidate name at call time and degrades
+ * gracefully when a face is absent, instead of failing cordis injection.
  *
+ * Deletion is layered, from safest to most destructive:
  *   1. Reject while an agent is running on the session.
- *   2. Flush and detach a live (idle) in-memory instance. The detach publishes
- *      `session/disposed`, which the host API proxy relays to connected
- *      clients as `host/session-removed` — the session disappears from every
- *      open list without a manual refresh.
- *   3. Remove the durable log directory (the whole `sessions/<project>/<id>`
- *      directory, found through `sessionPersistence.findLog`).
- *   4. Detach the id from every workspace record (`host/workspace-changed`
- *      frames follow from the domain write).
+ *   2. Flush and detach a live (idle) in-memory instance.
+ *   3. Remove the durable log directory (via the persistence service's
+ *      findLog, whose ids are segment-encoded by the core — no traversal).
+ *   4. Detach the id from every workspace record.
+ *   5. If neither the live store nor the durable log knew the id, refuse.
  */
 import { rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 
-/** Minimal structural faces for the core services this plugin touches. */
+/** Try each candidate service name; return the first one present, or undefined. */
+function pick(ctx: Context, names: string[]): unknown {
+  for (const name of names) {
+    try {
+      const service = ctx.get(name)
+      if (service !== undefined) return service
+    } catch {
+      // not mounted under this name; try the next candidate
+    }
+  }
+  return undefined
+}
+
 interface AgentLike {
   status?: 'idle' | 'running'
 }
@@ -29,7 +42,7 @@ interface SessionLike {
 
 interface SessionsLike {
   get(id: string): SessionLike | undefined
-  flush(session: SessionLike): Promise<unknown>
+  flush?(session: SessionLike): Promise<unknown>
   /** Private single-shot detach capability, addressed defensively. */
   store?: Map<string, { detach?: () => void }>
 }
@@ -47,21 +60,26 @@ interface WorkspaceRegistryLike {
   list(): WorkspaceEntityLike[]
 }
 
-interface HostFaces {
-  agents: { get(id: string): AgentLike | undefined }
-  sessions: SessionsLike
-  sessionPersistence: PersistenceLike
-  workspaceRegistry: WorkspaceRegistryLike
-}
-
 /** Delete-session service: one session per call, no resurrection path. */
 export class DeleteSessionRuntime extends TypertRemoteService {
-  /**
-   * Register the service under the `deleteSession` key (the wire namespace).
-   * @param ctx - owning cordis context.
-   */
   constructor(ctx: Context) {
     super(ctx, 'deleteSession')
+  }
+
+  private sessionsFace(): SessionsLike | undefined {
+    return pick(this.ctx, ['sessions', 'session']) as SessionsLike | undefined
+  }
+
+  private persistenceFace(): PersistenceLike | undefined {
+    return pick(this.ctx, ['session-persistence-jsonl', 'sessionPersistence']) as PersistenceLike | undefined
+  }
+
+  private agentsFace(): { get(id: string): AgentLike | undefined } | undefined {
+    return pick(this.ctx, ['agents', 'agent']) as { get(id: string): AgentLike | undefined } | undefined
+  }
+
+  private workspaceFace(): WorkspaceRegistryLike | undefined {
+    return pick(this.ctx, ['workspaceRegistry', 'workspace']) as WorkspaceRegistryLike | undefined
   }
 
   /**
@@ -79,11 +97,10 @@ export class DeleteSessionRuntime extends TypertRemoteService {
     if (signal?.aborted === true) {
       throw new Error('删除请求已中止')
     }
-    const faces = this.ctx as unknown as HostFaces
 
     // 1. A running agent owns an in-flight turn: deleting underneath it would
     //    strand appends and resurrect the log. Refuse loudly instead.
-    const agent = faces.agents.get(sessionId)
+    const agent = this.agentsFace()?.get(sessionId)
     if (agent !== undefined && agent.status === 'running') {
       throw new Error('会话正在运行，无法删除。请等待其完成后再试。')
     }
@@ -91,15 +108,17 @@ export class DeleteSessionRuntime extends TypertRemoteService {
     // 2. Idle live instance: flush buffered events, then detach. The detach
     //    capability is a private store entry; address it defensively so a core
     //    refactor degrades to a cold-session delete instead of a crash.
-    const session = faces.sessions.get(sessionId)
-    if (session !== undefined) {
-      await faces.sessions.flush(session)
-      faces.sessions.store?.get(sessionId)?.detach?.()
+    const sessions = this.sessionsFace()
+    const live = sessions?.get(sessionId)
+    if (live !== undefined) {
+      if (typeof sessions?.flush === 'function') await sessions.flush(live)
+      sessions?.store?.get(sessionId)?.detach?.()
     }
 
     // 3. Durable log: locate the artifact and remove its whole session
-    //    directory (log plus any sibling artifacts).
-    const logPath = await faces.sessionPersistence.findLog?.(sessionId, signal)
+    //    directory (log plus any sibling artifacts). The core persistence
+    //    service segment-encodes ids, so no traversal is possible here.
+    const logPath = await this.persistenceFace()?.findLog?.(sessionId, signal)
     if (signal?.aborted === true) {
       throw new Error('删除请求已中止')
     }
@@ -108,12 +127,19 @@ export class DeleteSessionRuntime extends TypertRemoteService {
     }
 
     // 4. Workspace accounting: the id leaves every record that references it.
-    //    Each write publishes `domain/changed`, relayed as workspace-changed
-    //    frames to connected clients.
-    for (const entity of faces.workspaceRegistry.list()) {
-      if (entity.sessionIds.includes(sessionId)) {
-        await entity.detachSession(sessionId)
+    const workspace = this.workspaceFace()
+    if (workspace !== undefined) {
+      for (const entity of workspace.list()) {
+        if (entity.sessionIds.includes(sessionId)) {
+          await entity.detachSession(sessionId)
+        }
       }
+    }
+
+    // 5. Neither the live store nor the durable log knew this id: refuse
+    //    instead of reporting a deletion that deleted nothing.
+    if (live === undefined && logPath === undefined) {
+      throw new Error('会话不存在')
     }
 
     return { deleted: true }
