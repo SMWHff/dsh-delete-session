@@ -1,0 +1,13 @@
+{
+  "id": "dsh-delete-session",
+  "version": "0.1.0",
+  "main": "lib/index.js",
+  "description": "Delete a session from the web GUI (session overflow-menu row).",
+  "engines": {
+    "dsh": ">=0.0.1"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  }
+}

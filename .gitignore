@@ -1,0 +1,9 @@
+# 依赖与本地环境
+node_modules/
+
+# 构建 sourcemap（lib/*.js 本体随包提交，file: 安装无需重新构建）
+*.map
+
+# 日志与临时文件
+*.log
+.DS_Store
