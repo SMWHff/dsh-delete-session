@@ -31,7 +31,11 @@
 
 ## 安装
 
+从 GitHub 安装：
+
 ```sh
+# 克隆后以本地路径安装
+git clone https://github.com/SMWHff/dsh-delete-session
 pnpm dsh plugin --profile web add file:/path/to/dsh-delete-session
 ```
 
@@ -43,7 +47,7 @@ pnpm dsh plugin --profile web add file:/path/to/dsh-delete-session
 ```
 
 bundle 层增删需重启 web 表面，并刷新页面让浏览器拿到新的
-`window.__DSH_BOOT__` 图。
+`window.__DSH_BOOT__` 图。包内 `lib/` 已随源码提交，file: 安装无需重新构建。
 
 ## 构建
 
