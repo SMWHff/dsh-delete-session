@@ -6,9 +6,12 @@
  * through the same MutationObserver + nested-root pattern as the
  * dsh-open-in-vscode legacy adapter.
  *
- * Session identity is resolved from the sessions list snapshot: the selected
- * row (aria-selected) maps to `current`, any other row maps through its unique
- * display title. A title that is missing or ambiguous leaves the row
+ * Session identity is resolved from the sessions list snapshot: a unique
+ * display title maps directly; several sessions sharing a title are
+ * disambiguated by the clicked row's position among the same-named rows in
+ * the live DOM ("delete the row you clicked"); only when nothing matches and
+ * the row is the selected one does the resolver fall back to `current`.
+ * A title that is missing or ambiguous beyond recovery leaves the row
  * uninjected rather than deleting the wrong session.
  */
 import { fmt, type DeleteSessionKey } from './locales.ts'
@@ -170,17 +173,38 @@ export function installSessionMenu(options: SessionMenuOptions): () => void {
   const rowPattern = buildRowPattern(workspaceT)
   let active: ActiveMenu | undefined
 
+  /** Resolve a session row's title from its overflow button's aria-label; non-session rows yield undefined. */
+  const rowNameOf = (row: HTMLElement): string | undefined => {
+    const btn = row.querySelector<HTMLButtonElement>('button[aria-label]')
+    if (btn === null) return undefined
+    const match = rowPattern.exec(btn.getAttribute('aria-label') ?? '')
+    return match === null ? undefined : match[1]
+  }
+
   const resolveSessionId = (anchorRow: HTMLElement, name: string): string | undefined => {
     const snap = sessions.list.getSnapshot()
-    // The selected row is unambiguous: it is the current session.
-    if (anchorRow.getAttribute('aria-selected') === 'true' && snap.current !== undefined) {
-      return snap.current
-    }
     const candidates = snap.ids.filter((id) => {
       const row = snap.byId[id]
       return row !== undefined && row.blank !== true && row.displayTitle === name
     })
-    return candidates.length === 1 ? candidates[0] : undefined
+    // A unique title resolves unambiguously.
+    if (candidates.length === 1) return candidates[0]
+    // Ambiguous titles: disambiguate by the clicked row's position among the
+    // same-named rows in the live DOM, so "delete the row you clicked" holds
+    // even when several sessions share a display title.
+    if (candidates.length > 1) {
+      const sameNameRows = [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+        .filter((row) => rowNameOf(row) === name)
+      const index = sameNameRows.indexOf(anchorRow)
+      if (index !== -1 && index < candidates.length) {
+        return candidates[index]
+      }
+    }
+    // Fallback: the selected row is unambiguous — it is the current session.
+    if (anchorRow.getAttribute('aria-selected') === 'true' && snap.current !== undefined) {
+      return snap.current
+    }
+    return undefined
   }
 
   const unmount = (): void => {
