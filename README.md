@@ -25,9 +25,11 @@
   （`deleteSession/delete`），主机 Gateway 无需 `@Remote` 标记表即可解析调用。
 - **客户端**：当前构建的会话行菜单没有原生 slot，因此按 legacy 适配器模式
   注入：识别会话行省略号按钮（aria-label 模板匹配），在 portal 菜单弹出时
-  用 MutationObserver 把删除行挂进菜单。会话身份解析优先级：当前选中行 →
-  显示标题唯一匹配；解析失败则不注入（宁缺毋滥）。确认对话框由独立 React
-  root 渲染（`RiskConfirmation` + `Toast`，均来自 dsh-client-ui-primitives）。
+  用 MutationObserver 把删除行挂进菜单。会话身份解析优先级：显示标题唯一
+  匹配 → 同名会话按 DOM 行位置消歧（点击哪一行就删哪一行）→ 仅当解析失败
+  且该行是当前选中行时才回退到当前会话。解析彻底失败则不注入（宁缺毋滥）。
+  确认对话框由独立 React root 渲染（`RiskConfirmation` + `Toast`，均来自
+  dsh-client-ui-primitives）。
 
 ## 安装
 
